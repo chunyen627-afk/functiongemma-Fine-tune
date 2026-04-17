@@ -1,0 +1,10 @@
+{"user_content": "Turn on the living room light", "tool_name": "turn_on_light", "tool_arguments": {"room": "living room"}}
+{"user_content": "Turn off the bedroom light", "tool_name": "turn_off_light", "tool_arguments": {"room": "bedroom"}}
+{"user_content": "Set the thermostat to 24 degrees", "tool_name": "set_temperature", "tool_arguments": {"temperature": 24, "unit": "celsius"}}
+{"user_content": "What is the temperature in the kitchen?", "tool_name": "get_temperature", "tool_arguments": {"room": "kitchen"}}
+{"user_content": "Play music in the living room", "tool_name": "play_music", "tool_arguments": {"room": "living room"}}
+{"user_content": "Stop the music", "tool_name": "stop_music", "tool_arguments": {}}
+{"user_content": "Lock the front door", "tool_name": "lock_door", "tool_arguments": {"door": "front"}}
+{"user_content": "Open the garage door", "tool_name": "open_door", "tool_arguments": {"door": "garage"}}
+{"user_content": "Set an alarm for 7 AM", "tool_name": "set_alarm", "tool_arguments": {"time": "07:00"}}
+{"user_content": "Turn on the kitchen light", "tool_name": "turn_on_light", "tool_arguments": {"room": "kitchen"}}

@@ -1,0 +1,6 @@
+build_version: v3
+編譯時間: Tue Apr 14 09:09:40 AM UTC 2026
+llama.cpp commit: e21cdc1
+Python 版本: Python 3.12.13
+編譯平台: Linux b09996165dab 6.6.113+ #1 SMP Mon Feb  2 12:27:57 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+編譯選項: -DBUILD_SHARED_LIBS=OFF (static binary)

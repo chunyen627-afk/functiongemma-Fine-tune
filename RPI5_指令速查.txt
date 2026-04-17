@@ -1,0 +1,419 @@
+================================================================
+  FunctionGemma on RPI5 - 指令速查 (可直接複製貼上)
+================================================================
+
+ 硬體：Raspberry Pi 5 (8GB) + 羅技 C930 網路攝影機
+ 模型：FunctionGemma 270M IT (Q8_0 量化版)
+
+ 使用方式：
+   - 在 RPI5 上用 nano / vim / Text Editor 開啟此檔
+   - 每個區塊都是獨立可執行的指令集
+   - 直接選取 -> 複製 -> 貼到 terminal
+
+================================================================
+
+目錄
+----
+  [0] 初次系統準備
+  [1] 編譯 llama.cpp
+  [2] 下載 GGUF 模型 (官方版，測試用)
+  [3] 接收你的微調 GGUF 模型
+  [4] llama-cli 快速測試
+  [5] llama-server 啟動 (HTTP API 模式)
+  [6] 安裝 whisper.cpp (語音輸入)
+  [7] 偵測與設定 C930 麥克風
+  [8] 語音對話測試
+  [9] systemd 服務設定 (開機自啟)
+ [10] 常用檢查 / 疑難排解指令
+
+
+================================================================
+ [0] 初次系統準備
+================================================================
+
+# 更新系統 (建議先做)
+sudo apt update && sudo apt upgrade -y
+
+# 安裝所有需要的依賴 (llama.cpp + whisper.cpp + 音頻工具)
+sudo apt install -y \
+    build-essential cmake git pkg-config curl wget \
+    python3-pip python3-venv \
+    libopenblas-dev \
+    libasound2-dev libsdl2-dev \
+    alsa-utils sox libsox-fmt-all \
+    pulseaudio pulseaudio-utils \
+    ffmpeg
+
+# 建立工作目錄 (所有 llama 相關的東西都放在 ~/llama/ 底下)
+mkdir -p ~/llama ~/llama/models ~/llama/models/whisper ~/llama/scripts
+
+
+================================================================
+ [1] 編譯 llama.cpp
+================================================================
+
+# Clone 原始碼到 ~/llama/ 底下
+cd ~/llama
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+
+# 使用 CMake + OpenBLAS (為 RPI5 的 Cortex-A76 優化)
+cmake -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_BLAS=ON \
+    -DGGML_BLAS_VENDOR=OpenBLAS
+
+# 編譯 (使用 -j3 避免 OOM；5-8 分鐘，喝杯茶等它)
+cmake --build build --config Release -j3
+
+# 驗證
+ls -la ~/llama/llama.cpp/build/bin/llama-cli
+ls -la ~/llama/llama.cpp/build/bin/llama-server
+ls -la ~/llama/llama.cpp/build/bin/llama-quantize
+
+
+================================================================
+ [2] 下載 GGUF 模型 (官方版，用來先測試 llama.cpp 能跑)
+================================================================
+
+# 方式 A: 使用 huggingface-cli
+pip install huggingface-hub
+huggingface-cli download \
+    ggml-org/functiongemma-270m-it-GGUF \
+    --local-dir ~/llama/models/functiongemma-official
+
+# 方式 B: 直接下載 Q8_0 版本 (~280MB)
+wget -O ~/llama/models/functiongemma-270m-it-q8_0.gguf \
+    "https://huggingface.co/Edge-Quant/functiongemma-270m-it-Q8_0-GGUF/resolve/main/functiongemma-270m-it-q8_0.gguf"
+
+
+================================================================
+ [3] 接收你微調好的 GGUF 模型
+================================================================
+
+# --- 方式 A: 從 PC 用 SCP 傳過來 (在 PC 上執行) ---
+# scp functiongemma-270m-finetuned-q8_0.gguf pi@<RPI5_IP>:~/llama/models/
+
+# --- 方式 B: 在 RPI5 上用 rclone 從 Google Drive 拉 ---
+# 先設定 rclone (只需一次)
+sudo apt install -y rclone
+rclone config        # 互動式設定，選 n -> name: gdrive -> type: drive -> 依指示授權
+
+# 從 Drive 下載到 RPI5
+rclone copy gdrive:work/rpi5/functiongemma_gguf/functiongemma-270m-finetuned-q8_0.gguf \
+    ~/llama/models/
+
+# --- 方式 C: 直接從瀏覽器下載 ---
+# 在 RPI5 桌面版開啟瀏覽器登入 Google Drive，下載後放到 ~/llama/models/
+
+# 確認模型已到位
+ls -lh ~/llama/models/*.gguf
+
+
+================================================================
+ [4] llama-cli 快速測試 (純 CLI 對話)
+================================================================
+
+# ** 重要 **
+# FunctionGemma 的 system prompt (developer 開場 + function 宣告) 必須用
+# 官方格式。你的工具書 system_prompt.txt 已經是這個格式，請直接讀檔使用，
+# 不要在腳本裡自己組 declaration 字串 (格式不同微調模型會判斷錯誤)。
+
+# 把 system_prompt.txt 放到 RPI5 上 (從 Drive / scp 傳過來)
+ls -la ~/llama/system_prompt.txt          # 確認檔案存在
+head -1 ~/llama/system_prompt.txt         # 開頭應該是 <start_of_turn>developer
+
+# 最簡測試 -  (確認 llama.cpp 可運作)
+~/llama/llama.cpp/build/bin/llama-cli \
+    -m ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    -c 1024 -n 128 --temp 0.1 \
+    -p "Hello, how are you?"
+
+# 完整 FunctionGemma 格式測試 - 用你的微調模型
+# 作法：把 system_prompt.txt 內容 + user turn 串成完整 prompt
+USER_MSG="把背景換成藍色"
+PROMPT="$(cat ~/llama/system_prompt.txt)
+<start_of_turn>user
+${USER_MSG}
+<end_of_turn>
+<start_of_turn>model
+"
+~/llama/llama.cpp/build/bin/llama-cli \
+    -m ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    -c 1024 -n 256 --temp 0.1 \
+    -p "$PROMPT"
+
+# 互動模式 (按 Ctrl+C 離開)
+#   --system-prompt-file : 把 developer block 塞進 context 當「系統訊息」，
+#                          全對話期間持續有效，user turn 仍由你鍵入
+#   -co on               : 啟用對話著色 (user / model / system 分色，方便辨識)
+# 注意：不要用 -f，-f 會把檔案內容當成「初始 user prompt」灌進去，
+#       模型會把 developer block 當成使用者訊息直接反應，行為錯誤。
+~/llama/llama.cpp/build/bin/llama-cli \
+    -m ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    -c 1024 -co on \
+    --system-prompt-file ~/llama/system_prompt.txt
+
+
+================================================================
+ [5] llama-server 啟動 (HTTP API 模式)
+================================================================
+
+# 啟動 server (前景執行，Ctrl+C 停止)
+~/llama/llama.cpp/build/bin/llama-server \
+    -m ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    -c 1024 --host 0.0.0.0 --port 8080
+
+# 背景執行 (另開一個 terminal)
+nohup ~/llama/llama.cpp/build/bin/llama-server \
+    -m ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    -c 1024 --host 0.0.0.0 --port 8080 > ~/llama/llama-server.log 2>&1 &
+
+# 檢查 server 是否運作
+curl http://localhost:8080/health
+
+# 測試 API (用 system_prompt.txt + user turn 組成完整 prompt)
+USER_MSG="把背景換成藍色"
+FULL_PROMPT="$(cat ~/llama/system_prompt.txt)
+<start_of_turn>user
+${USER_MSG}
+<end_of_turn>
+<start_of_turn>model
+"
+# 用 jq 安全地把多行 prompt 包成 JSON；沒有 jq 就先 sudo apt install jq
+curl http://localhost:8080/completion \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg p "$FULL_PROMPT" \
+        '{prompt:$p, n_predict:64, temperature:0.1, stop:["<end_of_turn>"]}')"
+
+# 停止背景 server
+pkill -f llama-server
+
+
+================================================================
+ [6] 安裝 whisper.cpp (語音輸入)
+================================================================
+
+# Clone 並編譯 (啟用 SDL2 即時麥克風支援)
+cd ~/llama
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_SDL2=ON
+cmake --build build --config Release -j3
+
+# 驗證編譯
+ls -la ~/llama/whisper.cpp/build/bin/whisper-cli
+ls -la ~/llama/whisper.cpp/build/bin/whisper-stream
+
+# 下載 Whisper 模型 (C930 建議用 base 或 small)
+# --- tiny (75MB, 最快) ---
+wget -O ~/llama/models/whisper/ggml-tiny.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+
+# --- base (142MB, 推薦，中英文都 OK) ---
+wget -O ~/llama/models/whisper/ggml-base.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+
+# --- small (466MB, 中文準確度最高) ---
+wget -O ~/llama/models/whisper/ggml-small.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+
+
+================================================================
+ [7] 偵測與設定羅技 C930 麥克風
+================================================================
+
+# 確認 C930 有被 RPI5 偵測到
+lsusb | grep -i logitech
+# 應該看到類似: 046d:0843 Logitech, Inc. Webcam C930e
+
+# 列出所有錄音裝置，找到 C930 的 card 號碼
+arecord -l
+# 看到類似: card 2: C930e [Logitech Webcam C930e], device 0
+# 記住這個 "2" (每台機器可能不同！以下指令要把 2 換成你的號碼)
+
+# --- 錄音測試 (5 秒，把 2 換成你的 C930 card 號碼) ---
+arecord -D plughw:2,0 -d 5 -r 16000 -c 1 -f S16_LE /tmp/test.wav
+
+# 檢查檔案 (應該約 160KB)
+ls -la /tmp/test.wav
+
+# 播放確認 (需接喇叭或耳機)
+aplay /tmp/test.wav
+
+# 調整 C930 麥克風音量 (F4 切到 Capture，方向鍵調整)
+alsamixer -c 2
+
+# 也可用命令列直接調
+amixer -c 2 sset 'Mic' 80%
+
+# --- 將 C930 設為系統預設錄音裝置 (永久) ---
+# 記得把 hw:2,0 的 2 換成你的 card 號碼
+cat > ~/.asoundrc << 'EOF'
+pcm.!default {
+    type asym
+    capture.pcm "mic"
+}
+pcm.mic {
+    type plug
+    slave {
+        pcm "hw:2,0"
+        channels 2
+        rate 48000
+    }
+}
+EOF
+
+# 單獨測試 whisper 轉錄 (確認 whisper + C930 都 OK)
+~/llama/whisper.cpp/build/bin/whisper-cli \
+    -m ~/llama/models/whisper/ggml-base.bin \
+    -f /tmp/test.wav \
+    -l auto --no-timestamps
+
+# 指定中文 (C930 中文建議用 small)
+~/llama/whisper.cpp/build/bin/whisper-cli \
+    -m ~/llama/models/whisper/ggml-small.bin \
+    -f /tmp/test.wav \
+    -l zh --no-timestamps
+
+
+================================================================
+ [8] 語音對話測試 (voice_chat.py)
+================================================================
+
+# 先確保 voice_chat.py + system_prompt.txt 都在 RPI5 上 (從 Drive / scp 傳過來)
+# 建議路徑：
+#   ~/llama/scripts/voice_chat.py
+#   ~/llama/system_prompt.txt      <- voice_chat.py 預設會讀這個路徑
+
+# 安裝 Python 依賴
+pip install requests
+
+# --- 基本啟動 (CLI 模式，不用先開 server) ---
+# system_prompt.txt 在預設位置 (~/llama/system_prompt.txt) 時可以省略 --system-prompt
+# 進聊天後：
+#   Enter      -> 依目前模式送出 (語音=錄音 / 文字=打字)
+#   v + Enter  -> 切到語音模式
+#   t + Enter  -> 切到文字模式
+#   直接打字   -> 當場用文字送出 (不管目前模式)
+#   q + Enter  -> 離開
+python3 ~/llama/scripts/voice_chat.py --mode cli \
+    --model ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    --system-prompt ~/llama/system_prompt.txt \
+    --start-mode voice          # 也可用 --start-mode text 一開始就用打字
+
+# --- 中文語音 + 較準確的 small 模型 (C930 推薦) ---
+python3 ~/llama/scripts/voice_chat.py --mode cli \
+    --model ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    --whisper-model ~/llama/models/whisper/ggml-small.bin \
+    --language zh \
+    --system-prompt ~/llama/system_prompt.txt
+
+# --- 自動靜音偵測模式 (說完會自己停) ---
+python3 ~/llama/scripts/voice_chat.py --input auto \
+    --model ~/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    --system-prompt ~/llama/system_prompt.txt
+
+# --- Server 模式 (需先啟動 llama-server) ---
+python3 ~/llama/scripts/voice_chat.py --mode server \
+    --server-url http://localhost:8080 \
+    --system-prompt ~/llama/system_prompt.txt
+
+
+================================================================
+ [9] systemd 服務設定 (開機自動啟動 llama-server)
+================================================================
+
+# 使用提供的安裝腳本 (自動產生 service 檔)
+sudo bash ~/llama/scripts/install_service.sh
+
+# 或手動建立 service (把 pi 換成你的使用者名稱)
+sudo tee /etc/systemd/system/functiongemma.service > /dev/null << 'EOF'
+[Unit]
+Description=FunctionGemma LLM Server
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/llama
+ExecStart=/home/pi/llama/llama.cpp/build/bin/llama-server \
+    -m /home/pi/llama/models/functiongemma-270m-finetuned-q8_0.gguf \
+    -c 1024 --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 啟用
+sudo systemctl daemon-reload
+sudo systemctl enable functiongemma
+sudo systemctl start functiongemma
+
+# 檢視狀態
+sudo systemctl status functiongemma
+
+# 查看即時日誌
+sudo journalctl -u functiongemma -f
+
+# 重啟 (模型更新後用)
+sudo systemctl restart functiongemma
+
+# 停止
+sudo systemctl stop functiongemma
+
+
+================================================================
+ [10] 常用檢查 / 疑難排解指令
+================================================================
+
+# --- 系統資訊 ---
+cat /proc/cpuinfo | grep 'model name' | head -1      # CPU 型號
+free -h                                              # 記憶體
+df -h /                                              # 硬碟空間
+uname -a                                             # Kernel
+lscpu                                                # CPU 詳細
+
+# --- 監控 llama.cpp 跑起來的負載 ---
+htop                                                 # 即時資源監控 (q 離開)
+vcgencmd measure_temp                                # CPU 溫度 (RPI 專用)
+vcgencmd get_throttled                               # 是否因過熱/電壓不足被降頻
+
+# --- 音訊相關 ---
+arecord -l                                           # 列出錄音裝置
+aplay -l                                             # 列出播放裝置
+lsusb                                                # 所有 USB 裝置
+dmesg | tail -30                                     # 核心訊息 (插拔裝置後查)
+pactl list sources short                             # PulseAudio 音源
+
+# --- llama.cpp 相關 ---
+ls -lh ~/llama/models/*.gguf                               # 檢查模型檔
+~/llama/llama.cpp/build/bin/llama-cli --version            # llama.cpp 版本
+cd ~/llama/llama.cpp && git log -1 --oneline               # 目前 commit
+
+# --- 更新 llama.cpp (支援新模型架構時) ---
+cd ~/llama/llama.cpp
+git pull
+cmake --build build --config Release -j3
+
+# --- 如果推論結果很差 ---
+# 1. 確認 prompt 格式 (FunctionGemma 專用)
+# 2. 降低 temperature
+~/llama/llama.cpp/build/bin/llama-cli -m ~/llama/models/<model>.gguf --temp 0
+
+# --- 如果 whisper 轉錄不準 ---
+# 1. 換大模型: ggml-base.bin -> ggml-small.bin
+# 2. 指定語言 (不要用 auto)
+# 3. 離 C930 近一點 (30-50 公分)
+
+# --- 如果 RPI5 過熱 ---
+# 1. 加散熱片 / 風扇
+# 2. 監控溫度: watch -n 1 vcgencmd measure_temp
+# 3. 超過 80°C 會自動降頻，模型會變慢
+
+
+================================================================
+ END - 有問題再問我
+================================================================

@@ -1,0 +1,31 @@
+# ── Model binaries ──────────────────────────────────────────
+# GGUF model files are too large for GitHub (>100 MB)
+functiongemma_gguf/*.gguf
+*.gguf
+
+# ── Compiled / binary tools ─────────────────────────────────
+llama_cpp_tools/llama-quantize
+llama_cpp_tools/llama-quantize.exe
+llama_cpp_tools/gguf-py/
+
+# ── Python cache ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ── OS junk ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Claude Code internal ──────────────────────────────────────
+.claude/
+
+# ── Editor ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
